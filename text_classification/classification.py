@@ -118,7 +118,44 @@ def test(model,processor,args,tokenizer,device):
         pre         :准确率
         recall      :召回率
     '''
-    
+
+    test_data=processor.get_test_data(args.data_dir)
+    test_features=data2feature(test_data,args.max_seq_length,tokenizer)
+    test_input_id=torch.tensor([f.input_ids for f in test_features],dtype=torch.long)
+    test_input_mask=torch.tensor([f.input_mask for f in text_features],dtype=torch.long)
+    test_label=torch.tensor([f.label for f in text_features],dtype=torch.long)
+
+    test_data=TensorDataset(test_input_id,test_input_mask,test_label)
+    test_sampler=SequentialSampler(test_data)
+    test_dataloader=DataLoader(test_data,sampler=test_sampler,batch_size=args.eval_batch_size)
+
+    model.eval()
+
+    for input_ids,input_mask,label in test_dataloader:
+        input_ids=input_ids.to(device)
+        input_mask=input_mask.to(device)
+        label=label.to(device)
+
+        with torch.no_grad():
+            logits = model(input_ids,input_mask)         
+            pred = logits.max(1)[1]
+            predict = np.hstack((predict, pred.cpu().numpy()))
+            gt = np.hstack((gt, label_ids.cpu().numpy()))
+
+        logits = logits.detach().cpu().numpy()
+        label = label.to('cpu').numpy()
+
+    f1 = np.mean(metrics.f1_score(predict, gt, average=None))
+    pre= np.mean(metrics.accuracy_score(predict,gt))
+    recall=np.mean(metrics.recall_score(predict,gt))
+
+    print('F1:%s \n pre:%s \n recall:%s'%(f1))
+
+    return f1,pre,recall
+
+
+ 
+
             
         
     
