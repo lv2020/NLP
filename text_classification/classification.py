@@ -32,9 +32,8 @@ class InputData():
         self.label=label
 
 class InputFeature():
-    def __init__(self,input_ids,input_mask,label):
+    def __init__(self,input_ids,label):
         self.input_ids=input_ids
-        self.input_mask=input_mask
         self.label=label
     
 class DataProcessor():
@@ -60,7 +59,7 @@ class DataProcessor():
         return datasets
 
 
-def data2feature(datasets,max_seq_length,tokenizer):
+def data2feature(datasets,tokenizer):
     '''
     word2vec
     Args:
@@ -76,31 +75,8 @@ def data2feature(datasets,max_seq_length,tokenizer):
     '''
     features=[]
     for example in datasets:
-        token = tokenizer.tokenize(example.text)
-        
-        '''
-        为[CLS]和[SEP]留下位置
-        '''
-        if len(token) > max_seq_length - 2:
-            token = token[0:(max_seq_length - 2)]
-            
-        tokens=[]
-        tokens.append('[CLS]')
-        for i in token:
-            tokens.append(i)
-        tokens.append("[SEP]")
-        
-        input_ids = tokenizer.convert_tokens_to_ids(tokens)
-        input_mask = [1 for i in input_ids]
-        
-        while len(input_ids) < max_seq_length:
-            input_ids.append(0)
-            input_mask.append(0)
-            
-        assert len(input_ids)==max_seq_length
-        assert len(input_mask)==max_seq_length
-        
-        features.append(InputFeature(input_ids,input_mask,label))
+        input_ids = tokenizer.encode(example.text)
+        features.append(InputFeature(input_ids,example.label))
         
     return features
 
@@ -153,9 +129,49 @@ def test(model,processor,args,tokenizer,device):
 
     return f1,pre,recall
 
+def main():
+    data_dir='./data'
+    myPro=DataProcessor()
+    train_data=myPro.get_train_data(data_dir)
+    test_data=myPro.get_test_data(data_dir)
+
+    input_ids=torch.tensor([f.input_ids for f in train_data], dtype=torch.long)
+    label=torch.tensor([f.label for f in train_data],dtype=torch.long)
+
+    train_data=TensorDataset(input_ids,label)
+    train_sampler = RandomSampler(train_data)
+    train_dataLoader=DataLoader(train_data,sampler=train_sampler,batch_size=128)
+
+    tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
+    model = BertForSequenceClassification.from_pretrained('bert-base-chinese')
+
+    model.train()
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+    model.to(device)
+
+    param_optimizer = list(model.named_parameters())
+    no_decay = ['bias', 'gamma', 'beta']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay_rate': 0.01},
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay_rate': 0.0}
+        ]
+    
+    optimizer = BertAdam(optimizer_grouped_parameters,
+                         lr=0.01,
+                         warmup=args.warmup_proportion)
+
+    for _ in trange(20,desc="epochs"):
+        for step, batch in enumerate(tqdm(train_dataLoader,desc="iteration")):
+            batch = tuple(t.to(device) for t in batch)
+            input_ids,label = batch
+            loss = model(input_ids,label)
+
+            loss.backward()
+            optimizer.step()
+            model.zero_grad()
+        print('loss= %s'%(loss))
+
+
 
  
-
-            
-        
     
