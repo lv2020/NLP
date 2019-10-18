@@ -6,7 +6,6 @@ Created on Thu Oct 10 10:22:35 2019
 @author: lvvv
 """
 
-
 import os
 import codecs
 import random
@@ -20,11 +19,12 @@ import pandas as pd
 import torch
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
+from sklearn.model_selection import train_test_split
+from torch import optim
 
-from pytorch_pretrained_bert.tokenization import BertTokenizer
-from pytorch_pretrained_bert.modeling import BertForSequenceClassification
+
 from pytorch_pretrained_bert.optimization import BertAdam
-from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
+
 
 class InputData():
     def __init__(self,text,label):
@@ -32,8 +32,9 @@ class InputData():
         self.label=label
 
 class InputFeature():
-    def __init__(self,input_ids,label):
+    def __init__(self,input_ids,input_mask,label):
         self.input_ids=input_ids
+        self.input_mask=input_mask
         self.label=label
     
 class DataProcessor():
@@ -44,22 +45,25 @@ class DataProcessor():
         datasets: 训练数据集，包括文本和标签两部分
     '''
     def get_train_data(self,data_dir):
-        return self.get_data(self,os.path.join(data_dir, "train.csv"),'train')
+        return self.get_data(os.path.join(data_dir, "train_balance.csv"),'train')
     
     def get_test_data(self,data_dir):
-        return self.get_data(self.os.path.join(data_dir, "test.csv"),'test')
+        return self.get_data(os.path.join(data_dir, "test.csv"),'test')
     
     def get_data(self,data_dir,types):
-        logger.info("loading %s data" % (types))
+
         datasets=[]
-        f=pd.read_csv(data_dir)
-        for i in f['label\tcomment']:
-            label,text=i.split('\t')
+        f=open(data_dir,'r')
+        ll=f.read().split('\n')
+        for i in ll:
+            if i=='':
+              break
+            text,label=i.split(',')
             datasets.append(InputData(text,int(label)))
         return datasets
 
 
-def data2feature(datasets,tokenizer):
+def data2feature(datasets,max_seq_length,tokenizer):
     '''
     word2vec
     Args:
@@ -76,7 +80,14 @@ def data2feature(datasets,tokenizer):
     features=[]
     for example in datasets:
         input_ids = tokenizer.encode(example.text)
-        features.append(InputFeature(input_ids,example.label))
+        input_mask=[1]*len(input_ids)
+        if len(input_mask)>max_seq_length:
+          input_ids=input_ids[:max_seq_length]
+          input_mask=input_mask[:max_seq_length]
+        while len(input_mask)<max_seq_length:
+            input_ids.append(0)
+            input_mask.append(0)
+        features.append(InputFeature(input_ids,input_mask,example.label))
         
     return features
 
@@ -129,24 +140,70 @@ def test(model,processor,args,tokenizer,device):
 
     return f1,pre,recall
 
+def submit():
+    f=pd.read_csv('./data/test_new.csv')
+    test_text=[]
+    text=[]
+    tokenizer=BertTokenizer.from_pretrained('bert-base-chinese')
+    for i in f['comment']:
+        tokens=tokenizer.encode(i)
+        text.append(i)
+        if len(tokens)>max_seq_length:
+            tokens=tokens[:max_seq_length]
+        else:
+            while len(tokens)<max_seq_length:
+                tokens.append(0)
+        test_text.append(tokens)
+    test_data=TensorDataset(torch.tensor([i for i in test_text],dtype=torch.long))
+    test_dataloader=DataLoader(test_data,batch_size=128)
+    predict = np.zeros((0,), dtype=np.int32)
+    res=[]
+    for step,batch in enumerate(tqdm(test_dataloader,desc="iteration")):
+        batch=tuple(t.to(device) for t in batch)
+        input_ids=batch[0]
+        with torch.no_grad():
+            logits=model(input_ids)[0]
+            pred=logits.max(1)[1]
+            predict=np.hstack((predict,pred.cpu().numpy()))
+    ids=[]
+    for i in f['id']:
+        ids.append(i)
+
+    f=open('./sample.csv','w')
+    f.write('id,label\n')
+    for i in range(2000):
+        f.write(ids[i]+','+str(predict[i])+'\n')
+    f.close()
+
 def main():
-    data_dir='./data'
-    myPro=DataProcessor()
-    train_data=myPro.get_train_data(data_dir)
-    test_data=myPro.get_test_data(data_dir)
+    max_seq_length=50
+    f=open('./data/train_balance.csv','r')
+    ll=f.read().split('\n')
+    tokenizer=BertTokenizer.from_pretrained('bert-base-chinese')
+    labels=[]
+    texts=[]
+    for i in ll:
+        if i=='':
+            break
+        text,l=i.split(',')
+        tokens=tokenizer.encode(text)
+        if len(tokens)>max_seq_length:
+            tokens=tokens[:max_seq_length]
+        else:
+            while len(tokens)<max_seq_length:
+                tokens.append(0)
+        texts.append(tokens)
+        labels.append(int(l))
 
-    input_ids=torch.tensor([f.input_ids for f in train_data], dtype=torch.long)
-    label=torch.tensor([f.label for f in train_data],dtype=torch.long)
+    train_data, dev_data,train_label, dev_label = train_test_split(texts, labels, test_size=0.2, random_state=42)
+    train_dataset=TensorDataset(torch.tensor([i for i in train_data],dtype=torch.long),torch.tensor([i for i in train_label],dtype=torch.long))
+    dev_dataset=TensorDataset(torch.tensor([i for i in dev_data],dtype=torch.long),torch.tensor([i for i in dev_label],dtype=torch.long))
+    train_dataloader=DataLoader(train_dataset,batch_size=128)
+    dev_dataloader=DataLoader(dev_dataset,batch_size=128)
 
-    train_data=TensorDataset(input_ids,label)
-    train_sampler = RandomSampler(train_data)
-    train_dataLoader=DataLoader(train_data,sampler=train_sampler,batch_size=128)
-
-    tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
     model = BertForSequenceClassification.from_pretrained('bert-base-chinese')
-
     model.train()
-    device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
     param_optimizer = list(model.named_parameters())
@@ -156,20 +213,42 @@ def main():
         {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay_rate': 0.0}
         ]
     
-    optimizer = BertAdam(optimizer_grouped_parameters,
-                         lr=0.01,
-                         warmup=args.warmup_proportion)
+    optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
 
-    for _ in trange(20,desc="epochs"):
-        for step, batch in enumerate(tqdm(train_dataLoader,desc="iteration")):
+    for _ in trange(10,desc="epochs"):
+        model.train()
+        for step, batch in enumerate(tqdm(train_dataloader,desc="iteration")):
             batch = tuple(t.to(device) for t in batch)
             input_ids,label = batch
-            loss = model(input_ids,label)
+            output = model(input_ids,labels=label)
+            loss=output[0]
 
             loss.backward()
             optimizer.step()
             model.zero_grad()
         print('loss= %s'%(loss))
+
+        model.eval()
+        predict = np.zeros((0,), dtype=np.int32)
+        gt = np.zeros((0,), dtype=np.int32)
+        for step, batch in enumerate(tqdm(dev_dataloader,desc="iteration")):
+            batch = tuple(t.to(device) for t in batch)
+            input_ids,label = batch
+
+            with torch.no_grad():
+                logits = model(input_ids)[0]       
+                pred = logits.max(1)[1]
+                predict = np.hstack((predict, pred.cpu().numpy()))
+                gt = np.hstack((gt, label.cpu().numpy()))
+
+            logits = logits.detach().cpu().numpy()
+            label = label.to('cpu').numpy()
+        f1 = np.mean(metrics.f1_score(predict, gt, average=None))
+        pre= np.mean(metrics.accuracy_score(predict,gt))
+        recall=np.mean(metrics.recall_score(predict,gt))
+
+        print('F1:%s \n pre:%s \n recall:%s'%(f1,pre,recall))
+
 
 
 
